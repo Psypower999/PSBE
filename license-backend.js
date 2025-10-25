@@ -21,13 +21,33 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Database file paths - Use persistent disk on Render
-const DATA_DIR = process.env.NODE_ENV === 'production' 
+// Database file paths - Use persistent disk on Render, fallback to local
+let DATA_DIR = process.env.NODE_ENV === 'production' 
     ? '/app/data' 
     : __dirname;
 
-const DB_PATH = path.join(DATA_DIR, 'license-database.json');
-const USERS_PATH = path.join(DATA_DIR, 'users-database.json');
+// Function to determine writable data directory
+async function getWritableDataDir() {
+    const dirs = ['/app/data', '/tmp/psystudio-data', __dirname];
+    
+    for (const dir of dirs) {
+        try {
+            await fs.mkdir(dir, { recursive: true });
+            const testFile = path.join(dir, '.test-write');
+            await fs.writeFile(testFile, 'test');
+            await fs.unlink(testFile);
+            console.log('[Database] Using writable directory:', dir);
+            return dir;
+        } catch (e) {
+            console.log('[Database] Directory not writable:', dir, e.message);
+        }
+    }
+    
+    throw new Error('No writable directory found');
+}
+
+let DB_PATH;
+let USERS_PATH;
 
 // Valid license codes (manage these in your admin panel)
 const VALID_LICENSE_CODES = [
@@ -39,16 +59,21 @@ const VALID_LICENSE_CODES = [
 // Initialize database files
 async function initDatabase() {
     try {
-        // Ensure data directory exists
-        try {
-            await fs.mkdir(DATA_DIR, { recursive: true });
-        } catch (e) {
-            // Directory already exists
-        }
+        console.log('[Database] Starting initialization...');
+        
+        // Find writable directory
+        DATA_DIR = await getWritableDataDir();
+        DB_PATH = path.join(DATA_DIR, 'license-database.json');
+        USERS_PATH = path.join(DATA_DIR, 'users-database.json');
+        
+        console.log('[Database] DATA_DIR:', DATA_DIR);
+        console.log('[Database] DB_PATH:', DB_PATH);
+        console.log('[Database] USERS_PATH:', USERS_PATH);
 
         // Initialize license database
         try {
             await fs.access(DB_PATH);
+            console.log('[Database] license-database.json exists');
         } catch {
             await fs.writeFile(DB_PATH, JSON.stringify({ licenses: {} }, null, 2));
             console.log('[Database] Created license-database.json');
@@ -57,6 +82,7 @@ async function initDatabase() {
         // Initialize users database
         try {
             await fs.access(USERS_PATH);
+            console.log('[Database] users-database.json exists');
         } catch {
             await fs.writeFile(USERS_PATH, JSON.stringify({ users: {} }, null, 2));
             console.log('[Database] Created users-database.json');
@@ -65,6 +91,7 @@ async function initDatabase() {
         console.log('[Database] Initialization complete');
     } catch (error) {
         console.error('[Database] Initialization error:', error);
+        throw error;
     }
 }
 
@@ -112,6 +139,12 @@ function verifyPassword(password, salt, hash) {
  */
 app.post('/api/activate-license', async (req, res) => {
     try {
+        console.log('[Activate] Request received:', { 
+            code: req.body.code, 
+            username: req.body.username,
+            hardwareID: req.body.hardwareID ? req.body.hardwareID.substring(0, 50) + '...' : 'missing'
+        });
+        
         const { code, username, password, hardwareID } = req.body;
         
         // Validate input
@@ -134,7 +167,13 @@ app.post('/api/activate-license', async (req, res) => {
         const licenseDB = await loadDatabase(DB_PATH);
         const usersDB = await loadDatabase(USERS_PATH);
         
+        console.log('[Activate] Databases loaded:', { 
+            licensesCount: licenseDB ? Object.keys(licenseDB.licenses || {}).length : 'ERROR',
+            usersCount: usersDB ? Object.keys(usersDB.users || {}).length : 'ERROR'
+        });
+        
         if (!licenseDB || !usersDB) {
+            console.error('[Activate] Database loading failed');
             return res.status(500).json({ 
                 success: false, 
                 error: 'Database error' 
@@ -208,8 +247,18 @@ app.post('/api/activate-license', async (req, res) => {
         };
         
         // Save databases
-        await saveDatabase(USERS_PATH, usersDB);
-        await saveDatabase(DB_PATH, licenseDB);
+        const saveResult1 = await saveDatabase(USERS_PATH, usersDB);
+        const saveResult2 = await saveDatabase(DB_PATH, licenseDB);
+        
+        console.log('[Activate] Save results:', { users: saveResult1, licenses: saveResult2 });
+        
+        if (!saveResult1 || !saveResult2) {
+            console.error('[Activate] Failed to save databases');
+            return res.status(500).json({ 
+                success: false, 
+                error: 'Failed to save activation data' 
+            });
+        }
         
         console.log(`[License] Activated: ${code} for user ${username}`);
         
@@ -224,10 +273,12 @@ app.post('/api/activate-license', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('Activation error:', error);
+        console.error('[Activate] Activation error:', error);
+        console.error('[Activate] Error stack:', error.stack);
         res.status(500).json({ 
             success: false, 
-            error: 'Server error during activation' 
+            error: 'Server error during activation',
+            details: error.message
         });
     }
 });
