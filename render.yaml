@@ -8,3 +8,7 @@ services:
       - key: NODE_ENV
         value: production
     plan: free
+    disk:
+      name: psystudio-license-data
+      mountPath: /app/data
+      sizeGB: 1

@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
@@ -14,45 +13,44 @@ if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// Initialize SQLite database
-const dbPath = path.join(dataDir, 'licenses.db');
-const db = new Database(dbPath);
+// JSON Database paths
+const dbPath = path.join(dataDir, 'database.json');
 
-// Create tables
-db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT,
-        license_code TEXT UNIQUE NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login DATETIME,
-        is_activated INTEGER DEFAULT 0
-    );
+// Initialize database structure
+let db = {
+    users: [],
+    devices: [],
+    sessions: []
+};
 
-    CREATE TABLE IF NOT EXISTS devices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        hardware_id TEXT NOT NULL,
-        device_name TEXT,
-        first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id),
-        UNIQUE(user_id, hardware_id)
-    );
+// Load database from file
+function loadDatabase() {
+    try {
+        if (fs.existsSync(dbPath)) {
+            const data = fs.readFileSync(dbPath, 'utf8');
+            db = JSON.parse(data);
+            console.log('Database loaded:', dbPath);
+        } else {
+            saveDatabase();
+            console.log('Database initialized:', dbPath);
+        }
+    } catch (error) {
+        console.error('Error loading database:', error);
+        db = { users: [], devices: [], sessions: [] };
+    }
+}
 
-    CREATE TABLE IF NOT EXISTS sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        session_token TEXT UNIQUE NOT NULL,
-        hardware_id TEXT NOT NULL,
-        expires_at DATETIME NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    );
-`);
+// Save database to file
+function saveDatabase() {
+    try {
+        fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf8');
+    } catch (error) {
+        console.error('Error saving database:', error);
+    }
+}
 
-console.log('Database initialized at:', dbPath);
+// Load database on startup
+loadDatabase();
 
 // Middleware
 app.use(cors({
@@ -110,26 +108,36 @@ app.post('/api/register', (req, res) => {
             return res.status(400).json({ error: 'Username must be at least 3 characters' });
         }
 
+        // Check if username exists
+        if (db.users.find(u => u.username === username)) {
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
         const licenseCode = generateLicenseCode();
 
-        // Create user WITHOUT password (set during first activation)
-        const stmt = db.prepare('INSERT INTO users (username, license_code, is_activated) VALUES (?, ?, 0)');
-        const result = stmt.run(username, licenseCode);
+        const newUser = {
+            id: db.users.length + 1,
+            username,
+            password_hash: null,
+            license_code: licenseCode,
+            created_at: new Date().toISOString(),
+            last_login: null,
+            is_activated: false
+        };
+
+        db.users.push(newUser);
+        saveDatabase();
 
         res.json({
             success: true,
             username,
             license_code: licenseCode,
-            user_id: result.lastInsertRowid
+            user_id: newUser.id
         });
 
     } catch (error) {
         console.error('Registration error:', error);
-        if (error.message.includes('UNIQUE constraint')) {
-            res.status(400).json({ error: 'Username already exists' });
-        } else {
-            res.status(500).json({ error: 'Registration failed' });
-        }
+        res.status(500).json({ error: 'Registration failed' });
     }
 });
 
@@ -142,18 +150,24 @@ app.post('/api/login', (req, res) => {
             return res.status(400).json({ error: 'Username, password, and hardware ID required' });
         }
 
-        const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+        const user = db.users.find(u => u.username === username);
 
-        if (!user || !user.password_hash || !verifyPassword(password, user.password_hash)) {
+        if (!user || !user.password_hash) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        if (user.is_activated === 0) {
+        // Verify password
+        const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
+        if (passwordHash !== user.password_hash) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        if (!user.is_activated) {
             return res.status(401).json({ error: 'License not activated. Please activate first.' });
         }
 
         // Check current device count
-        const devices = db.prepare('SELECT * FROM devices WHERE user_id = ?').all(user.id);
+        const devices = db.devices.filter(d => d.user_id === user.id);
         const existingDevice = devices.find(d => d.hardware_id === hardware_id);
 
         if (!existingDevice) {
@@ -166,29 +180,38 @@ app.post('/api/login', (req, res) => {
             }
 
             // Add new device
-            db.prepare('INSERT INTO devices (user_id, hardware_id, device_name) VALUES (?, ?, ?)').run(
-                user.id,
+            const newDevice = {
+                id: db.devices.length + 1,
+                user_id: user.id,
                 hardware_id,
-                `Device ${devices.length + 1}`
-            );
+                device_name: `Device ${devices.length + 1}`,
+                first_seen: new Date().toISOString(),
+                last_seen: new Date().toISOString()
+            };
+            db.devices.push(newDevice);
         } else {
             // Update last seen
-            db.prepare('UPDATE devices SET last_seen = CURRENT_TIMESTAMP WHERE id = ?').run(existingDevice.id);
+            existingDevice.last_seen = new Date().toISOString();
         }
 
         // Generate session token (30 days)
         const sessionToken = generateSessionToken();
         const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-        db.prepare('INSERT INTO sessions (user_id, session_token, hardware_id, expires_at) VALUES (?, ?, ?, ?)').run(
-            user.id,
-            sessionToken,
+        const newSession = {
+            id: db.sessions.length + 1,
+            user_id: user.id,
+            session_token: sessionToken,
             hardware_id,
-            expiresAt.toISOString()
-        );
+            expires_at: expiresAt.toISOString(),
+            created_at: new Date().toISOString()
+        };
+        db.sessions.push(newSession);
 
         // Update last login
-        db.prepare('UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?').run(user.id);
+        user.last_login = new Date().toISOString();
+
+        saveDatabase();
 
         res.json({
             success: true,
@@ -218,38 +241,48 @@ app.post('/api/activate-license', (req, res) => {
             return res.status(400).json({ error: 'Password must be at least 6 characters' });
         }
 
-        const user = db.prepare('SELECT * FROM users WHERE license_code = ?').get(license_code);
+        const user = db.users.find(u => u.license_code === license_code);
 
         if (!user) {
             return res.status(404).json({ error: 'Invalid license code' });
         }
 
         // Check if already activated
-        if (user.is_activated === 1) {
+        if (user.is_activated) {
             return res.status(400).json({ error: 'License already activated. Please use login instead.' });
         }
 
         // Set password and activate
-        const passwordHash = hashPassword(password);
-        db.prepare('UPDATE users SET password_hash = ?, is_activated = 1 WHERE id = ?').run(passwordHash, user.id);
+        const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
+        user.password_hash = passwordHash;
+        user.is_activated = true;
 
         // Add first device
-        db.prepare('INSERT INTO devices (user_id, hardware_id, device_name) VALUES (?, ?, ?)').run(
-            user.id,
+        const newDevice = {
+            id: db.devices.length + 1,
+            user_id: user.id,
             hardware_id,
-            'Device 1'
-        );
+            device_name: 'Device 1',
+            first_seen: new Date().toISOString(),
+            last_seen: new Date().toISOString()
+        };
+        db.devices.push(newDevice);
 
         // Generate session
         const sessionToken = generateSessionToken();
         const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-        db.prepare('INSERT INTO sessions (user_id, session_token, hardware_id, expires_at) VALUES (?, ?, ?, ?)').run(
-            user.id,
-            sessionToken,
+        const newSession = {
+            id: db.sessions.length + 1,
+            user_id: user.id,
+            session_token: sessionToken,
             hardware_id,
-            expiresAt.toISOString()
-        );
+            expires_at: expiresAt.toISOString(),
+            created_at: new Date().toISOString()
+        };
+        db.sessions.push(newSession);
+
+        saveDatabase();
 
         res.json({
             success: true,
@@ -274,21 +307,26 @@ app.post('/api/verify-session', (req, res) => {
             return res.status(400).json({ error: 'Session token and hardware ID required' });
         }
 
-        const session = db.prepare(`
-            SELECT s.*, u.username, u.license_code 
-            FROM sessions s 
-            JOIN users u ON s.user_id = u.id 
-            WHERE s.session_token = ? AND s.hardware_id = ? AND s.expires_at > datetime('now')
-        `).get(session_token, hardware_id);
+        const session = db.sessions.find(s => 
+            s.session_token === session_token && 
+            s.hardware_id === hardware_id && 
+            new Date(s.expires_at) > new Date()
+        );
 
         if (!session) {
             return res.status(401).json({ error: 'Invalid or expired session' });
         }
 
+        const user = db.users.find(u => u.id === session.user_id);
+
+        if (!user) {
+            return res.status(401).json({ error: 'User not found' });
+        }
+
         res.json({
             valid: true,
-            username: session.username,
-            license_code: session.license_code,
+            username: user.username,
+            license_code: user.license_code,
             expires_at: session.expires_at
         });
 
@@ -304,7 +342,11 @@ app.post('/api/logout', (req, res) => {
         const { session_token } = req.body;
 
         if (session_token) {
-            db.prepare('DELETE FROM sessions WHERE session_token = ?').run(session_token);
+            const sessionIndex = db.sessions.findIndex(s => s.session_token === session_token);
+            if (sessionIndex !== -1) {
+                db.sessions.splice(sessionIndex, 1);
+                saveDatabase();
+            }
         }
 
         res.json({ success: true });
@@ -322,19 +364,27 @@ app.get('/api/user/:username', (req, res) => {
         const { session_token } = req.headers;
 
         // Verify session
-        const session = db.prepare('SELECT user_id FROM sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').get(session_token);
+        const session = db.sessions.find(s => 
+            s.session_token === session_token && 
+            new Date(s.expires_at) > new Date()
+        );
         
         if (!session) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
 
-        const user = db.prepare('SELECT username, license_code, created_at, last_login FROM users WHERE username = ?').get(username);
+        const user = db.users.find(u => u.username === username);
 
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        res.json(user);
+        res.json({
+            username: user.username,
+            license_code: user.license_code,
+            created_at: user.created_at,
+            last_login: user.last_login
+        });
 
     } catch (error) {
         console.error('User fetch error:', error);
