@@ -1,23 +1,6 @@
-# Node modules
 node_modules/
-
-# Database files (local development only)
-*.json
-!package.json
-!render.yaml
-
-# Environment variables
-.env
-.env.local
-
-# Logs
+data/
+*.db
 *.log
-npm-debug.log*
-
-# OS files
+.env
 .DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
