@@ -231,9 +231,9 @@ app.post('/api/login', (req, res) => {
 // Activate license with hardware binding (first time setup)
 app.post('/api/activate-license', (req, res) => {
     try {
-        const { license_code, hardware_id, password } = req.body;
+        const { code, hardwareID, password } = req.body;
 
-        if (!license_code || !hardware_id || !password) {
+        if (!code || !hardwareID || !password) {
             return res.status(400).json({ error: 'License code, hardware ID, and password required' });
         }
 
@@ -241,7 +241,7 @@ app.post('/api/activate-license', (req, res) => {
             return res.status(400).json({ error: 'Password must be at least 6 characters' });
         }
 
-        const user = db.users.find(u => u.license_code === license_code);
+        const user = db.users.find(u => u.license_code === code);
 
         if (!user) {
             return res.status(404).json({ error: 'Invalid license code' });
@@ -261,7 +261,7 @@ app.post('/api/activate-license', (req, res) => {
         const newDevice = {
             id: db.devices.length + 1,
             user_id: user.id,
-            hardware_id,
+            hardware_id: hardwareID,
             device_name: 'Device 1',
             first_seen: new Date().toISOString(),
             last_seen: new Date().toISOString()
@@ -276,7 +276,7 @@ app.post('/api/activate-license', (req, res) => {
             id: db.sessions.length + 1,
             user_id: user.id,
             session_token: sessionToken,
-            hardware_id,
+            hardware_id: hardwareID,
             expires_at: expiresAt.toISOString(),
             created_at: new Date().toISOString()
         };
