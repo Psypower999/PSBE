@@ -6,6 +6,7 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+console.log('🚀 Starting Psychological Studio Backend Server...');
 
 // Ensure data directory exists
 const dataDir = path.join(__dirname, 'data');
@@ -151,23 +152,33 @@ app.post('/api/login', (req, res) => {
     try {
         const { username, password, hardware_id } = req.body;
 
+        console.log('Login attempt:', { username, hardware_id: hardware_id ? 'present' : 'missing', password: password ? 'present' : 'missing' });
+
         if (!username || !password || !hardware_id) {
+            console.log('Login failed: Missing required fields');
             return res.status(400).json({ error: 'Username, password, and hardware ID required' });
         }
 
         const user = db.users.find(u => u.username === username);
 
+        console.log('User lookup result:', user ? 'Found' : 'Not found');
+
         if (!user || !user.password_hash) {
+            console.log('Login failed: Invalid credentials (user not found or no password hash)');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         // Verify password
         const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
         if (passwordHash !== user.password_hash) {
+            console.log('Login failed: Invalid password');
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        console.log('Password verified successfully');
+
         if (!user.is_activated) {
+            console.log('Login failed: License not activated');
             return res.status(401).json({ error: 'License not activated. Please activate first.' });
         }
 
@@ -217,6 +228,8 @@ app.post('/api/login', (req, res) => {
         user.last_login = new Date().toISOString();
 
         saveDatabase();
+
+        console.log('Login successful for user:', username);
 
         res.json({
             success: true,
@@ -403,6 +416,32 @@ app.get('/api/user/:username', (req, res) => {
     } catch (error) {
         console.error('User fetch error:', error);
         res.status(500).json({ error: 'Failed to fetch user' });
+    }
+});
+
+// ADMIN: Reset database (use with caution!)
+app.post('/api/admin/reset-database', (req, res) => {
+    try {
+        const { adminKey } = req.body;
+
+        if (adminKey !== 'psypower-admin-2024') {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+
+        // Reset database to empty state
+        db = { users: [], devices: [], sessions: [] };
+        saveDatabase();
+
+        console.log('🔄 Database reset by admin');
+        res.json({ 
+            success: true, 
+            message: 'Database reset successfully',
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('Database reset error:', error);
+        res.status(500).json({ error: 'Reset failed' });
     }
 });
 
