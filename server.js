@@ -99,6 +99,8 @@ app.post('/api/register', (req, res) => {
     try {
         const { username, adminKey } = req.body;
 
+        console.log('Registration request received:', { username, adminKey: adminKey ? 'present' : 'missing' });
+
         // Admin authentication
         if (adminKey !== 'PSYPOWER_ADMIN_2025') {
             return res.status(403).json({ error: 'Unauthorized' });
@@ -127,6 +129,9 @@ app.post('/api/register', (req, res) => {
 
         db.users.push(newUser);
         saveDatabase();
+
+        console.log('✅ User registered:', username, 'License:', licenseCode.substring(0, 20) + '...');
+        console.log('Total users in DB:', db.users.length);
 
         res.json({
             success: true,
@@ -229,35 +234,44 @@ app.post('/api/login', (req, res) => {
 });
 
 // Activate license with hardware binding (first time setup)
+// User uploads .psylic file (contains licenseCode) + enters username + password
 app.post('/api/activate-license', (req, res) => {
     try {
-        const { code, hardwareID, password } = req.body;
+        const { licenseCode, username, password, hardwareID } = req.body;
 
-        if (!code || !hardwareID || !password) {
-            return res.status(400).json({ error: 'License code, hardware ID, and password required' });
+        console.log('Activation request received:', { 
+            licenseCode: licenseCode ? licenseCode.substring(0, 20) + '...' : 'missing',
+            username,
+            hardwareID: hardwareID ? 'present' : 'missing', 
+            password: password ? 'present' : 'missing' 
+        });
+        console.log('Current users in database:', db.users.length);
+
+        if (!licenseCode || !username || !hardwareID || !password) {
+            return res.status(400).json({ error: 'License code, username, hardware ID, and password required' });
         }
 
         if (password.length < 6) {
             return res.status(400).json({ error: 'Password must be at least 6 characters' });
         }
 
-        const user = db.users.find(u => u.license_code === code);
+        // Find unused license by license code
+        const user = db.users.find(u => u.license_code === licenseCode && !u.is_activated);
 
         if (!user) {
-            return res.status(404).json({ error: 'Invalid license code' });
+            console.log('❌ License code not found or already used');
+            return res.status(404).json({ error: 'Invalid or already activated license code' });
         }
 
-        // Check if already activated
-        if (user.is_activated) {
-            return res.status(400).json({ error: 'License already activated. Please use login instead.' });
-        }
+        console.log('✅ Valid unused license found, binding to username:', username);
 
-        // Set password and activate
+        // Bind license to the username/password they provide
+        user.username = username;
         const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
         user.password_hash = passwordHash;
         user.is_activated = true;
 
-        // Add first device
+        // Add first device (Device 1 of 3)
         const newDevice = {
             id: db.devices.length + 1,
             user_id: user.id,
